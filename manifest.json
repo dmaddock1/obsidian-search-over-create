@@ -1,0 +1,10 @@
+{
+  "id": "search-over-create",
+  "name": "Search Over Create",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Intercept clicks on unresolved internal links and run a vault search for the target name instead of creating an empty note.",
+  "author": "Dave Maddock",
+  "authorUrl": "https://github.com/dmaddock1",
+  "isDesktopOnly": false
+}
