@@ -1,6 +1,6 @@
 'use strict';
 
-const { Plugin, Notice } = require('obsidian');
+const { Plugin, Notice, MarkdownView } = require('obsidian');
 
 module.exports = class SearchInsteadOfCreate extends Plugin {
   async onload() {
@@ -33,11 +33,7 @@ module.exports = class SearchInsteadOfCreate extends Plugin {
     if (typeof evt.stopImmediatePropagation === 'function') {
       evt.stopImmediatePropagation();
     }
-    const raw = link.getAttribute('data-href')
-      || link.getAttribute('href')
-      || link.textContent
-      || '';
-    const target = this.cleanLinkText(raw);
+    const target = this.cleanLinkText(link.dataset.sicTarget || link.textContent || '');
     if (!target) return;
     this.searchFor(target);
   }
@@ -58,12 +54,14 @@ module.exports = class SearchInsteadOfCreate extends Plugin {
         const href = link.getAttribute('href') || '';
         if (/^[a-z]+:\/\//i.test(href) || href.startsWith('mailto:')) return null;
       }
-      const raw = link.getAttribute('data-href') || link.textContent || '';
-      const cleaned = this.cleanLinkText(raw);
-      if (!cleaned) return null;
-      if (/^[a-z]+:\/\//i.test(cleaned)) return null;
-      const dest = this.app.metadataCache.getFirstLinkpathDest(cleaned, '');
+      const info = this.getInlineLinkTarget(link);
+      if (!info) return null; // Couldn't determine the real target — don't interfere.
+      const linkpath = this.stripLinkSuffixes(info.linkpath);
+      if (!linkpath) return null;
+      if (/^[a-z]+:/i.test(linkpath)) return null;
+      const dest = this.app.metadataCache.getFirstLinkpathDest(linkpath, info.sourcePath);
       if (dest) return null;
+      link.dataset.sicTarget = linkpath;
       return link;
     }
 
@@ -86,6 +84,84 @@ module.exports = class SearchInsteadOfCreate extends Plugin {
     }
 
     return null;
+  }
+
+  // Work out the actual link target (not the displayed alias) for an inline
+  // link element. Returns { linkpath, sourcePath }, or null if unknown.
+  getInlineLinkTarget(link) {
+    const view = this.findMarkdownView(link);
+    const sourcePath = (view && view.file && view.file.path) || '';
+
+    // Reading view links carry the real target in data-href.
+    const dataHref = link.getAttribute('data-href');
+    if (dataHref) return { linkpath: dataHref, sourcePath };
+
+    // Live preview: the rendered span may contain only the alias text
+    // (e.g. [[file.pdf|Floor Map]] shows "Floor Map"), so recover the
+    // target from the underlying source text via CodeMirror.
+    const fromEditor = this.linkpathFromEditor(view, link);
+    if (fromEditor) return { linkpath: fromEditor, sourcePath };
+
+    // Without editor access, the text is only trustworthy when it isn't
+    // an alias or the display text of a markdown link.
+    if (link.classList.contains('cm-link-alias') || link.classList.contains('cm-link')) {
+      return null;
+    }
+    const text = link.textContent || '';
+    return text ? { linkpath: text, sourcePath } : null;
+  }
+
+  findMarkdownView(el) {
+    let found = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (!found && leaf.view instanceof MarkdownView && leaf.view.containerEl.contains(el)) {
+        found = leaf.view;
+      }
+    });
+    return found;
+  }
+
+  // Map the clicked element back to its source line and return the target
+  // of the wikilink or markdown link that contains it.
+  linkpathFromEditor(view, el) {
+    const cm = view && view.editor && view.editor.cm;
+    if (!cm || typeof cm.posAtDOM !== 'function') return null;
+    let pos;
+    try {
+      pos = cm.posAtDOM(el);
+    } catch (e) {
+      return null;
+    }
+    const line = cm.state.doc.lineAt(pos);
+    const offset = pos - line.from;
+    const re = /\[\[([^\]]+?)\]\]|\[[^\]]*\]\(([^)\s]+)\)/g;
+    let m;
+    while ((m = re.exec(line.text)) !== null) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (offset < start || offset > end) continue;
+      if (m[1] !== undefined) return m[1];
+      try {
+        return decodeURI(m[2]);
+      } catch (e) {
+        return m[2];
+      }
+    }
+    return null;
+  }
+
+  // Strip alias (|) and heading/block anchor (#, ^), keeping any folder path
+  // so path-qualified links resolve correctly.
+  stripLinkSuffixes(s) {
+    if (!s) return '';
+    let t = String(s).trim();
+    const pipe = t.indexOf('|');
+    if (pipe !== -1) t = t.slice(0, pipe);
+    const hash = t.indexOf('#');
+    if (hash !== -1) t = t.slice(0, hash);
+    const caret = t.indexOf('^');
+    if (caret !== -1) t = t.slice(0, caret);
+    return t.trim();
   }
 
   // Strip alias (|), heading/block anchor (#, ^), and any folder path —
